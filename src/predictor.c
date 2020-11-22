@@ -74,7 +74,7 @@ uint32_t BHTLocalIndex;
 
 counter* init_global_predictor(int globalHistoryBits, int BHTStartValue){
   //initialize BHT to be 0
-  int row = pow(2,globalHistoryBits);
+  unsigned long int row = pow(2,globalHistoryBits);
   counter* BranchHistoryTable = (counter*) calloc(row,sizeof(counter));
   memset (BranchHistoryTable,BHTStartValue,row);
   return BranchHistoryTable;
