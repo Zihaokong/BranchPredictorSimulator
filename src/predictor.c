@@ -7,10 +7,11 @@
 //========================================================//
 #include <stdio.h>
 #include "predictor.h"
-#include <math.h> 
 #include<string.h>
-
-
+#define MAX 3
+#define MIN 0
+#define INCREMENT(ct) ({ if((ct)->counter != MAX) (ct)->counter++;})
+#define DECREMENT(ct) ({ if((ct)->counter != MIN) (ct)->counter--;})
 #define PRED_MASK 2
 
 //
@@ -40,18 +41,7 @@ int verbose;
 
 typedef struct {
   char counter;
-}counter;
-
-void increment(counter* ct, int max){
-  if(ct->counter!=max) ct->counter++;
-}
-
-void decrement(counter* ct,int min){
-  if(ct->counter!=min) ct->counter--;
-}
-
-
-
+}SatCounter;
 
 
 //------------------------------------//
@@ -59,72 +49,47 @@ void decrement(counter* ct,int min){
 //------------------------------------//
 
 
-counter* BHT;
+SatCounter* BHTGlobal;
 uint32_t globalHistory;
 
+SatCounter* BHTLocal;
+uint32_t* PHTLocal;
 
-counter* BHTLocal;
-uint32_t* PHT_Local;
-
-
-//uint32_t BHTIndex;
-uint32_t BHTLocalIndex;
+SatCounter* META;
 
 
 
-counter* init_global_predictor(int globalHistoryBits, int BHTStartValue){
-  //initialize BHT to be 0
-  unsigned long int row = pow(2,globalHistoryBits);
-  counter* BranchHistoryTable = (counter*) calloc(row,sizeof(counter));
-  memset (BranchHistoryTable,BHTStartValue,row);
-  return BranchHistoryTable;
+
+
+void init_global_predictor(int BHTStartValue, SatCounter** BHT){
+  //initialize BHT to be Weakly Not Taken
+  globalHistory = 0;
+  *BHT = (SatCounter*) malloc((1 << ghistoryBits) * sizeof(SatCounter));
+  memset (*BHT,BHTStartValue,(1<<ghistoryBits) * sizeof(SatCounter));
 }
 
-uint8_t global_predict(int pcIndexBits, counter* BHT, uint32_t pc){
-  uint32_t indexedPC = pc % (1<<pcIndexBits);
 
+uint8_t Gshare_predict(uint32_t pc){
+  uint32_t indexedPC = pc % (1<<ghistoryBits);
   uint32_t BHTIndex = indexedPC ^ globalHistory;
 
-  uint8_t counter = BHT[BHTIndex].counter;
+  uint8_t counter = BHTGlobal[BHTIndex].counter;
   return (counter & PRED_MASK) >> 1;  
-  }
+}
 
 
-
-
-void train_global(uint32_t pcIndexBits, uint32_t pc, uint8_t outcome, counter* BHT){
-  uint32_t indexedPC = pc % (1<<pcIndexBits);
+void Gshare_train(uint32_t pc, uint8_t outcome){
+  uint32_t indexedPC = pc % (1<<ghistoryBits);
   uint32_t BHTIndex = indexedPC ^ globalHistory;
   uint32_t outcome_padd = outcome;
 
-  if(outcome == 1) increment(BHT+BHTIndex,3);
-  else decrement(BHT+BHTIndex,0); 
-
-
+  if(outcome == 1) INCREMENT(BHTGlobal+BHTIndex);     //increment(BHT+BHTIndex,3);
+  else DECREMENT(BHTGlobal+BHTIndex);                                         //decrement(BHT+BHTIndex,0); 
 
   globalHistory = globalHistory<<1;
-  globalHistory = globalHistory % (1<<pcIndexBits);
+  globalHistory = globalHistory % (1<<ghistoryBits);
   globalHistory = globalHistory | outcome_padd;
 
-
-}
-
-
-
-//void global_train
-
-
-
-
-counter* init_local_predictor(int pcIndexBits, int lhistoryBits, int BHTStartValue, uint32_t ** PatternHistorytable){
-  int row_PHT = pow(2,pcIndexBits);
-  *PatternHistorytable = (uint32_t*) calloc(row_PHT,sizeof(uint32_t));
-
-  int row_BHT = pow(2,lhistoryBits);
-  counter* BranchHistoryTable = (counter*) calloc(row_BHT,sizeof(counter));
-  memset (BranchHistoryTable,BHTStartValue,row_BHT);
-
-  return BranchHistoryTable;
 }
 
 
@@ -132,19 +97,71 @@ counter* init_local_predictor(int pcIndexBits, int lhistoryBits, int BHTStartVal
 
 
 
+void init_tour_predictor(int BHTStartValue, SatCounter** BHTGlobal, SatCounter** BHTLocal, uint32_t** PHT, SatCounter** META ){
 
+  // 2**12 entries of global branch history table
+  init_global_predictor(BHTStartValue, BHTGlobal);
 
+  // 2**10 entries of local history table
+  *PHT = (uint32_t*) calloc((1<<pcIndexBits),sizeof(uint32_t));
+  // 2**10 entries of local branch history table
+  *BHTLocal = (SatCounter*)calloc((1<<lhistoryBits), sizeof(SatCounter));
+  memset(*BHTLocal, BHTStartValue,(1<<lhistoryBits)*sizeof(SatCounter));
 
-uint8_t local_predict(int pcIndexBits, uint32_t* PHT_Local, counter* BHTLocal, uint32_t pc){
+  // 2 ** 12 entries of meta predictor history table.
+  *META = (SatCounter*) calloc((1<<ghistoryBits), sizeof(SatCounter));
+  memset(*META, BHTStartValue, (1<<ghistoryBits)*sizeof(SatCounter));
+}
+
+uint8_t Tour_predict(uint32_t pc){
+  uint8_t global_prediction = (BHTGlobal[globalHistory].counter & PRED_MASK) >> 1;
+
   uint32_t indexedPC = pc % (1<<pcIndexBits);
-  uint8_t counter = BHTLocal[PHT_Local[indexedPC]].counter;
+  uint8_t local_prediction = (BHTLocal[PHTLocal[indexedPC]].counter & PRED_MASK) >> 1;
 
-  return (counter & PRED_MASK) >> 1;
+  uint8_t chooser_prediction = (META[globalHistory].counter & PRED_MASK) >> 1;
+
+
+  uint8_t result = (chooser_prediction == 0)? global_prediction : local_prediction;
+  return result;
 
 }
+
+
+void Tour_train(uint32_t pc, uint8_t outcome){
+  uint8_t global_prediction = (BHTGlobal[globalHistory].counter & PRED_MASK) >> 1;
+  uint32_t indexedPC = pc % (1<<pcIndexBits);
+  uint8_t local_prediction = (BHTLocal[PHTLocal[indexedPC]].counter & PRED_MASK) >> 1;
+
+  // train meta predictor
+  if(global_prediction == outcome && local_prediction != outcome) DECREMENT(META+globalHistory);                                        //decrement(META + globalHistory, 0);
+  else if(local_prediction == outcome && global_prediction != outcome) INCREMENT(META+globalHistory);   //increment(META + globalHistory, 3);
+
+
+  // train global predictor
+  uint32_t outcome_padd = outcome;
+  if(outcome == 1)  INCREMENT(BHTGlobal+globalHistory);                                                       //increment(BHT+globalHistory,3);
+  else DECREMENT(BHTGlobal+globalHistory);                                                                      //decrement(BHT+globalHistory,0); 
+
+  globalHistory = globalHistory<<1;
+  globalHistory = globalHistory % (1<<ghistoryBits);
+  globalHistory = globalHistory | outcome_padd;
+
+  // train local predictor
+  uint32_t patternHistory = PHTLocal[indexedPC];
+  if(outcome == 1)  INCREMENT(BHTLocal+patternHistory);                                                  //increment(BHTLocal+patternHistory,3);
+  else DECREMENT(BHTLocal+patternHistory);                                   //decrement(BHTLocal+patternHistory,0); 
+
+  patternHistory = patternHistory << 1;
+  patternHistory = patternHistory % (1<< lhistoryBits);
+  patternHistory = patternHistory | outcome_padd;
+
+  PHTLocal[indexedPC] = patternHistory;
+}
+
+
 
 // Initialize the predictor
-//
 void
 init_predictor()
 {
@@ -153,13 +170,11 @@ init_predictor()
       return;
 
     case GSHARE:;
-      BHT = init_global_predictor(ghistoryBits,2);
+      init_global_predictor(WN, &BHTGlobal);
       return;
     case TOURNAMENT:;
-      BHT = init_global_predictor(ghistoryBits,2);
-      BHTLocal = init_local_predictor(pcIndexBits, lhistoryBits,2,&PHT_Local);
-
-      //meta predictor
+      init_tour_predictor(WN,&BHTGlobal,&BHTLocal,&PHTLocal,&META);
+      return;
   }
 }
 
@@ -177,15 +192,10 @@ uint8_t make_prediction(uint32_t pc)
       return TAKEN;
     case GSHARE:
       //call predictor method 
-      return global_predict(ghistoryBits,BHT,pc);
-    case TOURNAMENT:;
+      return Gshare_predict(pc);
+    case TOURNAMENT:
       //call predictor method
-      uint8_t result;
-
-      uint8_t lResult = local_predict(pcIndexBits,PHT_Local,BHTLocal,pc);
-      uint8_t gResult = global_predict(pcIndexBits,BHT,pc);
-
-      return result;
+      return Tour_predict(pc);
     case CUSTOM:
     default:
       break;
@@ -207,12 +217,15 @@ train_predictor(uint32_t pc, uint8_t outcome)
     case STATIC:
       return;
     case GSHARE:;
-      train_global(ghistoryBits,pc,outcome,BHT);
-    
+      Gshare_train(pc,outcome);
+      return;
+    case TOURNAMENT:;
+      Tour_train(pc, outcome);
+      return;
+
     default:
       break;
   }
-
 }
 
 

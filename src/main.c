@@ -10,6 +10,9 @@
 #include <string.h>
 #include "predictor.h"
 
+
+
+
 FILE *stream;
 char *buf = NULL;
 size_t len = 0;
@@ -80,6 +83,7 @@ read_branch(uint32_t *pc, uint8_t *outcome)
 int
 main(int argc, char *argv[])
 {
+
   // Set defaults
   stream = stdin;
   bpType = STATIC;
