@@ -98,6 +98,7 @@ init_cache()
   l2cacheMisses     = 0;
   l2cachePenalties  = 0;
   
+  //calculating data bits given block size.
   int data_bit = 0;
   int temp = blocksize;
   while(temp != 1) {
@@ -105,16 +106,18 @@ init_cache()
     data_bit++;
   }
 
-
+  //initialize I-cache
   icache.name = ICACHE;
   icache.tags = (uint32_t**) malloc(sizeof(uint32_t*)*icacheAssoc);
   icache.status = (bool**) malloc(sizeof(bool*)*icacheAssoc);
   icache.LRU_bits = (uint32_t**) malloc(sizeof(uint32_t*)*icacheAssoc);
+  //2D pointer for associativity and number of sets
   for(int i = 0; i < icacheAssoc;i++){
     icache.tags[i] = (uint32_t*) calloc(icacheSets,sizeof(uint32_t));
     icache.status[i] = (bool*) calloc(icacheSets,sizeof(bool));
     icache.LRU_bits[i] = (bool*) calloc(icacheSets,sizeof(uint32_t));
   }
+  //store cache meta data such as associativity, inclusive, hit time, offset bit, index bit and tag bit
   icache.asso = icacheAssoc;
   icache.inclusive = 0;
   icache.hit_time = icacheHitTime;
@@ -132,7 +135,7 @@ init_cache()
   icache.tag_bit = sizeof(int)*8 - icache.index_bit - icache.data_offset;
 
 
-
+  //initialize D-cache
   dcache.name = DCACHE;
   dcache.tags = (uint32_t**) malloc(sizeof(uint32_t*)*dcacheAssoc);
   dcache.status = (bool**) malloc(sizeof(bool*)*dcacheAssoc);
@@ -160,7 +163,7 @@ init_cache()
   dcache.tag_bit = sizeof(int)*8 - dcache.index_bit - dcache.data_offset;
 
 
-
+  //inizialize L2 cache, can be inclusive or exclusive
   l2cache.name = L2CACHE;
   l2cache.tags = (uint32_t**) malloc(sizeof(uint32_t*)*l2cacheAssoc);
   l2cache.status = (bool**) malloc(sizeof(bool*)*l2cacheAssoc);
@@ -186,13 +189,13 @@ init_cache()
   }
   l2cache.index_bit = index; 
   l2cache.tag_bit = sizeof(int)*8 - l2cache.index_bit - l2cache.data_offset;
-
 }
 
 
-
+//calling from L2 cache access, when using a inclusive cache, remove corresponding data in I cache
+//or D cache when an entry is evicted from L2 cache
 void L1_cache_validate(uint32_t addr){
-
+  //look for Evicted data in I cache
   uint32_t i_tag = addr >> (icache.data_offset + icache.index_bit);
   uint32_t i_index = addr % (1<< (icache.data_offset + icache.index_bit));
   i_index = i_index >> icache.data_offset;
@@ -206,10 +209,12 @@ void L1_cache_validate(uint32_t addr){
     }
   }
 
+  //look for evicted data in D cache
   uint32_t d_tag = addr >> (dcache.data_offset + dcache.index_bit);
   uint32_t d_index = addr % (1<< (dcache.data_offset + dcache.index_bit));
   d_index = d_index >> dcache.data_offset;
 
+  //found
   for(int i = 0; i < dcache.asso;i++){
     if(dcache.status[i][d_index] == true && dcache.tags[i][d_index] == d_tag){
       dcache.status[i][d_index] = 0;
@@ -221,19 +226,25 @@ void L1_cache_validate(uint32_t addr){
 
 
 
-
+//generic function to access a cache
 uint32_t cache_access(CACHE* cache, uint32_t addr){
+  //calculate tagbit, index bit given memory address
   uint32_t tag = addr >> ((cache->data_offset)+(cache->index_bit));
   uint32_t index = addr % (1<< ((cache->data_offset) + (cache->index_bit)));
   index = index >> cache->data_offset;
-
+  //base cache penalty
   uint32_t memtime = cache->hit_time;
 
 
+  //CACHE HIT
+
+  //look for data in an entry, look for all associative slots 
   for(int i = 0;i < cache->asso;i++){
     if(cache->status[i][index] == true && cache->tags[i][index] == tag){
+      //update least recent use bit
       cache->LRU_bits[i][index] = 0;
 
+      //update all LRU bits in a cache line
       if(cache->name == ICACHE){
         for(int i = 0;i<icache.asso;i++) cache->LRU_bits[i][index] +=1;
       } else if(cache->name == DCACHE){
@@ -247,28 +258,29 @@ uint32_t cache_access(CACHE* cache, uint32_t addr){
   }
 
 
-  // CACHEMISS
+  // CACHEEMISS
 
-  //if the current cache is not L2 cache, access L2 cache.
+  //if the current cache is not L2 cache, look for data in L2 cache.
   if(cache->name != L2CACHE){
     int extra_time = l2cache_access(addr);
     memtime += extra_time;
   }
+  //in L2 cache, didn't find data, look for data in Memory, calculate memory penalty 
   else{
     int extra_time = memspeed;
     memtime += extra_time;
   }
 
+  //place the data into cache, find a open slot if possible
   uint32_t entry_num = 0;
-  
-  
   while(entry_num < (cache->asso)){
     if(cache->status[entry_num][index] == 1) entry_num++;
     else break;
   }
-  // evict
-  if(entry_num == cache->asso){
 
+  // didn't find an open slot, evicting least recent used cacheline
+  if(entry_num == cache->asso){
+    //look for LRU index
     int max=0, max_index=0;
     for(int i = 0;i < cache->asso;i++){
       if(cache->status[i][index] == 1 && cache->LRU_bits[i][index] > max){
@@ -277,29 +289,30 @@ uint32_t cache_access(CACHE* cache, uint32_t addr){
       }
     }
 
-    //inclusive policy
+    //inclusive policy, in L2, evicting and also evicting I-cache and D-cache same entry.
     if(cache->name == L2CACHE && cache->inclusive == 1){
-
-
+      //recalculate the memory address given data in the cache
       uint32_t evicted_tag = cache->tags[max_index][index];
       uint32_t evicted_index = index;
       uint32_t reconstructed = evicted_tag << (cache->data_offset + cache->index_bit);
       reconstructed = reconstructed | (evicted_index << cache->data_offset); 
-
+      //look for data in higher level cache
       L1_cache_validate(reconstructed);
     }
 
-
+    //non inclusive policy, change the LRU bit's tag and update LRU bit
     cache->tags[max_index][index] = tag;
     cache->LRU_bits[max_index][index] = 0;
   } else {
-
+    
+    // find an open slot, update it
     cache->status[entry_num][index] = 1;
     cache->tags[entry_num][index] = tag;
     cache->LRU_bits[entry_num][index] = 0;
   }
 
 
+  //finally update all LRU bits
   if(cache->name == ICACHE){
     for(int i = 0;i<icache.asso;i++) cache->LRU_bits[i][index] +=1;
   } else if(cache->name == DCACHE){
@@ -322,19 +335,19 @@ uint32_t
 icache_access(uint32_t addr)
 {
   uint32_t total_cycles;
+  //when we have I cache, access it
   if(icache.index_bit != 0){
     icacheRefs++;
     total_cycles = cache_access(&icache, addr);
     
+    //indicate a cache miss
     if(total_cycles != icache.hit_time){
       icacheMisses++;
       icachePenalties += total_cycles - icache.hit_time;
     } 
-  } else {
-    total_cycles = l2cache_access(addr);
-  }
+  // delegate to L2 cache
+  } else total_cycles = l2cache_access(addr);
   
-
   return total_cycles;
 }
 
@@ -345,6 +358,7 @@ uint32_t
 dcache_access(uint32_t addr)
 {
   uint32_t total_cycles;
+  //when we have D cache, access it
   if(dcache.index_bit != 0){
     dcacheRefs++;
     total_cycles = cache_access(&dcache, addr);
@@ -353,11 +367,9 @@ dcache_access(uint32_t addr)
       dcacheMisses++;
       dcachePenalties += total_cycles - dcache.hit_time;
     } 
-  } else{
-    total_cycles = l2cache_access(addr);
-  }
+  //delegate to L2 cache
+  } else total_cycles = l2cache_access(addr);
 
-  
   return total_cycles;
 }
 
@@ -369,7 +381,9 @@ l2cache_access(uint32_t addr)
 {
 
   l2cacheRefs++;
+  //access L2 cache
   uint32_t total_cycles = cache_access(&l2cache, addr);
+  //calculate cache penalty
   if(total_cycles != l2cache.hit_time){
     l2cacheMisses++;
     l2cachePenalties += total_cycles - l2cache.hit_time;
